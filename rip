@@ -1,0 +1,89 @@
+#!/bin/bash
+
+set -eu -o pipefail
+
+ARGS=()
+
+PRESET="Fast 1080p30"
+
+MODE="movie"
+ARG=""
+TITLE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -m|--movie)
+            MODE="movie"
+            shift
+            ;;
+        -s|--series)
+            MODE="SERIES"
+            shift
+            ARG="${1-1:1}"
+            shift
+            ;;
+        -t|--title)
+            shift
+            TITLE="$1"
+            shift
+            ;;
+        -*)
+            echo "Unknown option $1"
+            exit 1
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+set -- "${ARGS[@]}"
+DEVICE=${1-/dev/sr0}
+DIR=${2-$(pwd)}
+NAME="$(echo $RANDOM | base64)"
+
+mkdir "${DIR}/${NAME}"
+
+LOG="${DIR}/${NAME}/rip.log"
+cat <<EOF >"$LOG"
+DEVICE: $DEVICE
+DIR: $DIR
+MODE: $MODE
+ARG: $ARG
+NAME: $NAME
+EOF
+
+META=$(HandBrakeCLI --main-feature --scan -i "$DEVICE" 2>&1)
+if [ -z "$TITLE" ]; then
+    TITLE=$(echo "$META" | grep "DVD Title:" | sed -e 's/^.*DVD Title: //')
+fi
+MAIN=$(echo "$META" | grep "Found main feature title" | sed -e 's/^Found main feature title //')
+CHAPTERS=$(echo "$META" | grep "title ${MAIN} has .* chapters" | sed -e 's/.*has \(.*\) chapters/\1/')
+
+cat <<EOF >>"$LOG"
+TITLE: $TITLE
+MAIN: $MAIN
+CHAPTERS: $CHAPTERS
+EOF
+
+# Rip the DVD data to a temp folder
+echo "Copying content from DVD"
+dvdbackup -M -i "$DEVICE" -o "$DIR" -n "$NAME" -p 2>>"$LOG"
+
+if [ "$MODE" == "movie" ]; then
+    echo "Encoding movie as ${DIR}/${TITLE}.m4v"
+    HandBrakeCLI -Z "$PRESET" -i "${DIR}/${NAME}/VIDEO_TS" -t "$MAIN" -o "${DIR}/${TITLE}.m4v"
+else
+    se=$(printf "%02d" "$(echo "$ARG" | cut -d: -f1)")
+    ep_offset=$(echo "$ARG" | cut -d: -f2)
+    for i in $(seq 1 "$CHAPTERS"); do
+        ep=$(printf "%02d" "$((i+ep_offset-1))")
+        fn="${DIR}/${TITLE}-S${se}E${ep}.m4v"
+
+        echo "Encoding chapter ${i} as ${fn}"
+        HandBrakeCLI -Z "$PRESET" -i "${NAME}/VIDEO_TS" -t "$MAIN" -c "$i" -o "$fn" 2>>"$LOG"
+    done
+fi
+
+rm -r "${DIR:?}/${NAME}"
